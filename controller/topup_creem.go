@@ -116,7 +116,7 @@ func (*CreemAdaptor) RequestPay(c *gin.Context, req *CreemPayRequest) {
 	// 先创建订单记录，使用产品配置的金额和充值额度
 	topUp := &model.TopUp{
 		UserId:          id,
-		Amount:          selectedProduct.Quota, // 充值额度
+		Amount:          float64(selectedProduct.Quota), // 充值额度
 		Money:           selectedProduct.Price, // 支付金额
 		TradeNo:         referenceId,
 		PaymentMethod:   model.PaymentMethodCreem,

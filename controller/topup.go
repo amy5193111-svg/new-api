@@ -207,11 +207,11 @@ func getMaxTopUpAmount() float64 {
 		Div(quotaPerUnit).
 		Floor()
 	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
-		return maxStoredAmount.Add(decimal.NewFromInt(1)).
+		return float64(maxStoredAmount.Add(decimal.NewFromInt(1)).
 			Mul(quotaPerUnit).
 			Ceil().
 			Sub(decimal.NewFromInt(1)).
-			IntPart()
+			IntPart())
 	}
 	return float64(maxStoredAmount.IntPart())
 }
@@ -323,7 +323,7 @@ func RequestEpay(c *gin.Context) {
 	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
 		dAmount := decimal.NewFromFloat(amount)
 		dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
-		amount = dAmount.Div(dQuotaPerUnit).IntPart()
+		amount = float64(dAmount.Div(dQuotaPerUnit).IntPart())
 	}
 	topUp := &model.TopUp{
 		UserId:          id,
