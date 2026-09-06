@@ -64,7 +64,7 @@ func getWaffoPancakePayMoney(amount int64, group string) float64 {
 		topupGroupRatio = 1
 	}
 
-	discount := operation_setting.GetAmountDiscount(amount)
+	discount := operation_setting.GetAmountDiscount(float64(amount))
 
 	payMoney := dAmount.
 		Mul(decimal.NewFromFloat(setting.WaffoPancakeUnitPrice)).
