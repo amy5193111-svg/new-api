@@ -81,11 +81,12 @@ export function calculatePresetPricing(
   discount: number,
   usdExchangeRate: number = 1
 ) {
-  const originalPrice = presetValue * priceRatio
-  const actualPrice = originalPrice * discount
+  // 人民币显示(美元×汇率)取整, 避免 4.97/10.01 这类尾数
+  const originalPrice = Math.round(presetValue * usdExchangeRate)
+  const actualPrice = Math.round(originalPrice * discount)
   const savedAmount = originalPrice - actualPrice
   const hasDiscount = discount < 1.0
-  const displayValue = presetValue * usdExchangeRate
+  const displayValue = originalPrice
 
   return {
     displayValue,

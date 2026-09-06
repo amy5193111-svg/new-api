@@ -332,14 +332,16 @@ export function RechargeFormCard({
                         method.min_topup || 0,
                         getMinTopupAmount(topupInfo)
                       )
+                      // 显示用人民币(×汇率), 比较仍用美元
+                      const minTopupRmb = Math.round(minTopup * usdExchangeRate * 100) / 100
                       const disabled = minTopup > topupAmount
                       const disabledReason = disabled
                         ? t('Minimum topup amount: {{amount}}', {
-                            amount: minTopup,
+                            amount: minTopupRmb,
                           })
                         : undefined
                       const disabledLabel = disabled
-                        ? `${t('Minimum:')} ${minTopup}`
+                        ? `${t('Minimum:')} ${minTopupRmb}`
                         : undefined
 
                       const button = (
@@ -415,14 +417,15 @@ export function RechargeFormCard({
                         const loadingKey = `waffo-${index}`
                         const methodKey = `${method.payMethodType ?? 'unknown'}-${method.payMethodName ?? method.name}`
                         const waffoMin = waffoMinTopup || 0
+                        const waffoMinRmb = Math.round(waffoMin * usdExchangeRate * 100) / 100
                         const belowMin = waffoMin > topupAmount
                         const disabledReason = belowMin
                           ? t('Minimum topup amount: {{amount}}', {
-                              amount: waffoMin,
+                              amount: waffoMinRmb,
                             })
                           : undefined
                         const disabledLabel = belowMin
-                          ? `${t('Minimum:')} ${waffoMin}`
+                          ? `${t('Minimum:')} ${waffoMinRmb}`
                           : undefined
 
                         let methodIcon = getPaymentIcon('waffo')
