@@ -302,7 +302,7 @@ export function RechargeFormCard({
                     type='number'
                     value={localAmount}
                     onChange={(e) => handleAmountChange(e.target.value)}
-                    min={minTopup}
+                    min={Math.round(minTopup * usdExchangeRate * 100) / 100}
                     placeholder={`Minimum ${Math.round(minTopup * usdExchangeRate * 100) / 100}`}
                     className='h-9 text-base sm:h-10 sm:text-lg'
                   />
