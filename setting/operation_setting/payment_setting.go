@@ -1,6 +1,11 @@
 package operation_setting
 
-import "github.com/QuantumNous/new-api/setting/config"
+import (
+	"math"
+	"strconv"
+
+	"github.com/QuantumNous/new-api/setting/config"
+)
 
 type PaymentSetting struct {
 	AmountOptions  []float64       `json:"amount_options"`
@@ -28,6 +33,24 @@ func init() {
 
 func GetPaymentSetting() *PaymentSetting {
 	return &paymentSetting
+}
+
+func GetAmountDiscount(amount float64) float64 {
+	const tolerance = 0.01 // 美元；约等于人民币 0.069 元
+	bestDistance := tolerance + 1
+	bestDiscount := 1.0
+	for rawAmount, discount := range paymentSetting.AmountDiscount {
+		presetAmount, err := strconv.ParseFloat(rawAmount, 64)
+		if err != nil || discount <= 0 {
+			continue
+		}
+		distance := math.Abs(amount - presetAmount)
+		if distance <= tolerance && distance < bestDistance {
+			bestDistance = distance
+			bestDiscount = discount
+		}
+	}
+	return bestDiscount
 }
 
 func IsPaymentComplianceConfirmed() bool {

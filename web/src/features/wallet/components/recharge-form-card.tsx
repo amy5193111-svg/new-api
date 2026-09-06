@@ -122,11 +122,14 @@ export function RechargeFormCard({
   useEffect(() => {
     // 输入过程中不回写，避免清空/小数点输入时光标跳动
     if (isEditingAmountRef.current) return
-    const localValue = topupAmount * usdExchangeRate
+    const localValue =
+      selectedPreset !== null
+        ? Math.round(selectedPreset * usdExchangeRate)
+        : topupAmount * usdExchangeRate
     setLocalAmount(
       localValue > 0 ? String(Math.round(localValue * 100) / 100) : ''
     )
-  }, [topupAmount, usdExchangeRate])
+  }, [topupAmount, selectedPreset, usdExchangeRate])
 
   const handleAmountChange = (value: string) => {
     // 允许空值、整数、小数和正在输入的小数点
