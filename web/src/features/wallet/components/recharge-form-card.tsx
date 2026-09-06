@@ -320,7 +320,8 @@ export function RechargeFormCard({
                 <div className='grid grid-cols-[minmax(0,1fr)_minmax(110px,0.55fr)] gap-2 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center'>
                   <Input
                     id='topup-amount'
-                    type='number'
+                    type='text'
+                    inputMode='decimal'
                     step='any'
                     value={localAmount}
                     onFocus={handleAmountFocus}
