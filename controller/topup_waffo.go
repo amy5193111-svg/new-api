@@ -96,7 +96,7 @@ func getWaffoPayMoney(amount float64, group string) float64 {
 		topupGroupRatio = 1
 	}
 	discount := 1.0
-	if ds, ok := operation_setting.GetPaymentSetting().AmountDiscount[int(originalAmount)]; ok {
+	if ds, ok := operation_setting.GetPaymentSetting().AmountDiscount[float64(originalAmount)]; ok {
 		if ds > 0 {
 			discount = ds
 		}
@@ -124,7 +124,7 @@ func RequestWaffoAmount(c *gin.Context) {
 		return
 	}
 	id := c.GetInt("id")
-	if rejectInvalidTopUpQuota(c, id, req.Amount) {
+	if rejectInvalidTopUpQuota(c, id, float64(req.Amount)) {
 		return
 	}
 
@@ -161,7 +161,7 @@ func RequestWaffoPay(c *gin.Context) {
 		return
 	}
 	id := c.GetInt("id")
-	if rejectInvalidTopUpQuota(c, id, req.Amount) {
+	if rejectInvalidTopUpQuota(c, id, float64(req.Amount)) {
 		return
 	}
 
