@@ -14,7 +14,7 @@ var CustomCallbackAddress = ""
 var EpayId = ""
 var EpayKey = ""
 var Price = 7.3
-var MinTopUp = 1
+var MinTopUp = 1.0
 var USDExchangeRate = 7.3
 
 var PayMethods = []map[string]string{

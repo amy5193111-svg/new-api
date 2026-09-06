@@ -113,20 +113,28 @@ export function RechargeFormCard({
   enableWaffoPancakeTopup,
 }: RechargeFormCardProps) {
   const { t } = useTranslation()
-  const [localAmount, setLocalAmount] = useState(topupAmount.toString())
+  // 输入框以人民币显示(金额×汇率), 提交时转回美元
+  const [localAmount, setLocalAmount] = useState(
+    topupAmount > 0 ? (topupAmount * usdExchangeRate).toString() : ''
+  )
 
   useEffect(() => {
     // Empty string must survive, otherwise the field can never be cleared
     setLocalAmount((prev) =>
-      prev === '' && topupAmount === 0 ? prev : topupAmount.toString()
+      prev === '' && topupAmount === 0
+        ? prev
+        : Math.round(topupAmount * usdExchangeRate * 100) / 100 === 0
+          ? ''
+          : (Math.round(topupAmount * usdExchangeRate * 100) / 100).toString()
     )
-  }, [topupAmount])
+  }, [topupAmount, usdExchangeRate])
 
   const handleAmountChange = (value: string) => {
     setLocalAmount(value)
-    const numValue = Number.parseInt(value) || 0
+    // 人民币输入 -> 美元(÷汇率)
+    const numValue = Number.parseFloat(value) || 0
     if (numValue >= 0) {
-      onTopupAmountChange(numValue)
+      onTopupAmountChange(Math.round((numValue / usdExchangeRate) * 100) / 100)
     }
   }
 
@@ -295,7 +303,7 @@ export function RechargeFormCard({
                     value={localAmount}
                     onChange={(e) => handleAmountChange(e.target.value)}
                     min={minTopup}
-                    placeholder={`Minimum ${minTopup}`}
+                    placeholder={`Minimum ${Math.round(minTopup * usdExchangeRate * 100) / 100}`}
                     className='h-9 text-base sm:h-10 sm:text-lg'
                   />
                   <div className='bg-muted/30 flex min-h-9 items-center justify-between gap-2 rounded-md border px-3 lg:min-w-52'>
