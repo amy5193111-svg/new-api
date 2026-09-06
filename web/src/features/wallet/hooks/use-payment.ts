@@ -112,7 +112,7 @@ export function usePayment() {
         setProcessing(true)
 
         const isStripe = isStripePayment(paymentType)
-        const amount = Math.floor(topupAmount)
+        const amount = Number(topupAmount.toFixed(2)) // 保留小数金额(0.5档位), 原 Math.floor 会截断成0
 
         const response = isStripe
           ? await requestStripePayment({
