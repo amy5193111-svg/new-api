@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Gift, ExternalLink, Loader2, Receipt, WalletCards } from 'lucide-react'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -113,28 +113,49 @@ export function RechargeFormCard({
   enableWaffoPancakeTopup,
 }: RechargeFormCardProps) {
   const { t } = useTranslation()
-  // 输入框以人民币显示(金额×汇率), 提交时转回美元
+  // 人民币显示(金额×汇率), 提交时转回美元
   const [localAmount, setLocalAmount] = useState(
     topupAmount > 0 ? (topupAmount * usdExchangeRate).toString() : ''
   )
+  const isEditingAmountRef = useRef(false)
 
   useEffect(() => {
-    // Empty string must survive, otherwise the field can never be cleared
-    setLocalAmount((prev) =>
-      prev === '' && topupAmount === 0
-        ? prev
-        : Math.round(topupAmount * usdExchangeRate * 100) / 100 === 0
-          ? ''
-          : (Math.round(topupAmount * usdExchangeRate * 100) / 100).toString()
+    // 输入过程中不回写，避免清空/小数点输入时光标跳动
+    if (isEditingAmountRef.current) return
+    const localValue = topupAmount * usdExchangeRate
+    setLocalAmount(
+      localValue > 0 ? String(Math.round(localValue * 100) / 100) : ''
     )
   }, [topupAmount, usdExchangeRate])
 
   const handleAmountChange = (value: string) => {
+    // 允许空值、整数、小数和正在输入的小数点
+    if (!/^\d*(\.\d*)?$/.test(value)) return
     setLocalAmount(value)
-    // 人民币输入 -> 美元(÷汇率)
-    const numValue = Number.parseFloat(value) || 0
-    if (numValue >= 0) {
-      onTopupAmountChange(Math.round((numValue / usdExchangeRate) * 100) / 100)
+
+    // 不在空值/孤立小数点时强行回写，避免输入被打断
+    if (value === '' || value === '.') return
+    const numValue = Number(value)
+    if (Number.isFinite(numValue) && numValue >= 0) {
+      // 人民币输入 -> 美元，保留4位避免折扣档位精度损失
+      onTopupAmountChange(Math.round((numValue / usdExchangeRate) * 10000) / 10000)
+    }
+  }
+
+  const handleAmountFocus = () => {
+    isEditingAmountRef.current = true
+  }
+
+  const handleAmountBlur = () => {
+    isEditingAmountRef.current = false
+    if (localAmount === '' || localAmount === '.') {
+      onTopupAmountChange(0)
+      setLocalAmount('')
+      return
+    }
+    const numValue = Number(localAmount)
+    if (Number.isFinite(numValue) && numValue >= 0) {
+      setLocalAmount(String(Math.round(numValue * 100) / 100))
     }
   }
 
@@ -300,8 +321,11 @@ export function RechargeFormCard({
                   <Input
                     id='topup-amount'
                     type='number'
+                    step='any'
                     value={localAmount}
+                    onFocus={handleAmountFocus}
                     onChange={(e) => handleAmountChange(e.target.value)}
+                    onBlur={handleAmountBlur}
                     min={Math.round(minTopup * usdExchangeRate * 100) / 100}
                     placeholder={`Minimum ${Math.round(minTopup * usdExchangeRate * 100) / 100}`}
                     className='h-9 text-base sm:h-10 sm:text-lg'
