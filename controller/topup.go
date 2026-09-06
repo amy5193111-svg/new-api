@@ -182,7 +182,7 @@ func getMinTopup() float64 {
 	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
 		dMinTopup := decimal.NewFromFloat(minTopup)
 		dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
-		minTopup = common.QuotaFromDecimal(dMinTopup.Mul(dQuotaPerUnit))
+		minTopup = float64(common.QuotaFromDecimal(dMinTopup.Mul(dQuotaPerUnit)))
 	}
 	return float64(minTopup)
 }
