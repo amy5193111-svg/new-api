@@ -383,6 +383,9 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 			return types.NewError(fmt.Errorf("expected OpenAI Responses response, got %T", convertResult.Value), types.ErrorCodeBadResponseBody)
 		}
 		if responseID := helper.GetResponseID(c); responseID != "" {
+			if !strings.HasPrefix(responseID, "resp_") {
+				responseID = "resp_" + responseID
+			}
 			responsesResponse.ID = responseID
 		}
 		responseData, err = common.Marshal(responsesResponse)

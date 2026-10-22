@@ -74,7 +74,7 @@ func ChatCompletionsResponseToResponsesResponseWithTools(resp *dto.OpenAITextRes
 	if reasoning := choice.Message.GetReasoningContent(); reasoning != "" {
 		out.Output = append(out.Output, dto.ResponsesOutput{
 			Type:   responsesOutputTypeReasoning,
-			ID:     fmt.Sprintf("rs_%s_0", id),
+			ID:     fmt.Sprintf("rs_%s_0", responsesOutputBaseID(id)),
 			Status: responseOutputStatus(out),
 			Summary: []dto.ResponsesReasoningSummaryPart{
 				{
@@ -91,7 +91,7 @@ func ChatCompletionsResponseToResponsesResponseWithTools(resp *dto.OpenAITextRes
 		}
 		out.Output = append(out.Output, dto.ResponsesOutput{
 			Type:   responsesOutputTypeMessage,
-			ID:     fmt.Sprintf("msg_%s_0", id),
+			ID:     fmt.Sprintf("msg_%s_0", responsesOutputBaseID(id)),
 			Status: responseOutputStatus(out),
 			Role:   "assistant",
 			Content: []dto.ResponsesOutputContent{
@@ -124,6 +124,18 @@ func responsesResponseID(id string) string {
 		return id
 	}
 	return "resp_" + id
+}
+
+// responsesOutputBaseID drops prefixes the caller may already have applied, so
+// output ids never come out double-prefixed (msg_msg_..., rs_rs_...).
+func responsesOutputBaseID(id string) string {
+	id = strings.TrimSpace(id)
+	for _, prefix := range []string{"msg_", "rs_", "resp_"} {
+		if strings.HasPrefix(id, prefix) {
+			return strings.TrimPrefix(id, prefix)
+		}
+	}
+	return id
 }
 
 func chatAnnotationsToResponses(raw []byte) ([]any, error) {

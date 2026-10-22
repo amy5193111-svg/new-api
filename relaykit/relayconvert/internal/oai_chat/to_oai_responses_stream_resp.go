@@ -850,18 +850,19 @@ func (s *ChatToResponsesStreamState) outputStatus() string {
 }
 
 func (s *ChatToResponsesStreamState) responseID() string {
-	if strings.HasPrefix(s.ID, "resp_") {
+	base := responsesOutputBaseID(s.ID)
+	if base == "" {
 		return s.ID
 	}
-	return "resp_" + s.ID
+	return "resp_" + base
 }
 
 func (s *ChatToResponsesStreamState) messageID() string {
-	return fmt.Sprintf("msg_%s_%d", s.ID, s.textSegment)
+	return fmt.Sprintf("msg_%s_%d", responsesOutputBaseID(s.ID), s.textSegment)
 }
 
 func (s *ChatToResponsesStreamState) reasoningID() string {
-	return fmt.Sprintf("rs_%s_%d", s.ID, s.reasoningSegment)
+	return fmt.Sprintf("rs_%s_%d", responsesOutputBaseID(s.ID), s.reasoningSegment)
 }
 
 func (s *ChatToResponsesStreamState) messageOutput(status string) *dto.ResponsesOutput {
