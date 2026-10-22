@@ -663,7 +663,7 @@ func (s *ChatToResponsesStreamState) finalResponse() *dto.OpenAIResponsesRespons
 		}
 	}
 	return &dto.OpenAIResponsesResponse{
-		ID:                s.ID,
+		ID:                s.responseID(),
 		Object:            "response",
 		CreatedAt:         int(s.Created),
 		Status:            []byte(fmt.Sprintf("%q", s.status)),
@@ -676,7 +676,7 @@ func (s *ChatToResponsesStreamState) finalResponse() *dto.OpenAIResponsesRespons
 
 func (s *ChatToResponsesStreamState) createdResponse() *dto.OpenAIResponsesResponse {
 	return &dto.OpenAIResponsesResponse{
-		ID:        s.ID,
+		ID:        s.responseID(),
 		Object:    "response",
 		CreatedAt: int(s.Created),
 		Status:    []byte(`"in_progress"`),
@@ -719,12 +719,19 @@ func (s *ChatToResponsesStreamState) outputStatus() string {
 	return "completed"
 }
 
+func (s *ChatToResponsesStreamState) responseID() string {
+	if strings.HasPrefix(s.ID, "resp_") {
+		return s.ID
+	}
+	return "resp_" + s.ID
+}
+
 func (s *ChatToResponsesStreamState) messageID() string {
-	return fmt.Sprintf("%s_msg_0", s.ID)
+	return fmt.Sprintf("msg_%s_0", s.ID)
 }
 
 func (s *ChatToResponsesStreamState) reasoningID() string {
-	return fmt.Sprintf("%s_reasoning_0", s.ID)
+	return fmt.Sprintf("rs_%s_0", s.ID)
 }
 
 func (s *ChatToResponsesStreamState) messageOutput(status string) *dto.ResponsesOutput {

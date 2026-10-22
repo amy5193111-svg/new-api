@@ -39,7 +39,7 @@ func ChatCompletionsResponseToResponsesResponse(resp *dto.OpenAITextResponse, id
 
 	usage := UsageFromChatUsage(&resp.Usage)
 	out := &dto.OpenAIResponsesResponse{
-		ID:        id,
+		ID:        responsesResponseID(id),
 		Object:    "response",
 		CreatedAt: chatCreatedAt(resp.Created),
 		Status:    []byte(`"completed"`),
@@ -61,7 +61,7 @@ func ChatCompletionsResponseToResponsesResponse(resp *dto.OpenAITextResponse, id
 	if reasoning := choice.Message.GetReasoningContent(); reasoning != "" {
 		out.Output = append(out.Output, dto.ResponsesOutput{
 			Type:   responsesOutputTypeReasoning,
-			ID:     fmt.Sprintf("%s_reasoning_0", id),
+			ID:     fmt.Sprintf("rs_%s_0", id),
 			Status: responseOutputStatus(out),
 			Summary: []dto.ResponsesReasoningSummaryPart{
 				{
@@ -78,7 +78,7 @@ func ChatCompletionsResponseToResponsesResponse(resp *dto.OpenAITextResponse, id
 		}
 		out.Output = append(out.Output, dto.ResponsesOutput{
 			Type:   responsesOutputTypeMessage,
-			ID:     fmt.Sprintf("%s_msg_0", id),
+			ID:     fmt.Sprintf("msg_%s_0", id),
 			Status: responseOutputStatus(out),
 			Role:   "assistant",
 			Content: []dto.ResponsesOutputContent{
@@ -100,6 +100,14 @@ func ChatCompletionsResponseToResponsesResponse(resp *dto.OpenAITextResponse, id
 	}
 
 	return out, usage, nil
+}
+
+func responsesResponseID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" || strings.HasPrefix(id, "resp_") {
+		return id
+	}
+	return "resp_" + id
 }
 
 func chatAnnotationsToResponses(raw []byte) ([]interface{}, error) {
