@@ -15,6 +15,11 @@ type ChannelSettings struct {
 	TaskPluginKey             string `json:"task_plugin_key,omitempty"`
 	ForceFormat               bool   `json:"force_format,omitempty"`
 	ThinkingToContent         bool   `json:"thinking_to_content,omitempty"`
+	// DefaultReasoningEffort 在客户端未显式指定思考档时，为该渠道请求注入顶层
+	// reasoning_effort（上游可识别的字符串，如 low/medium/high）。空值=不注入。
+	DefaultReasoningEffort string `json:"default_reasoning_effort,omitempty"`
+	// DefaultReasoningEffortModels 用逗号分隔限定注入生效的模型名；空=该渠道全部模型。
+	DefaultReasoningEffortModels string `json:"default_reasoning_effort_models,omitempty"`
 	Proxy                     string `json:"proxy"`
 	PassThroughBodyEnabled    bool   `json:"pass_through_body_enabled,omitempty"`
 	ResponsesWebSocketEnabled bool   `json:"responses_websocket_enabled,omitempty"`

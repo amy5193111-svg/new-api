@@ -108,9 +108,8 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	other.SetPublic("model_price", modelPrice)
 	other.SetPublic("user_group_ratio", userGroupRatio)
 	other.SetPublic("frt", float64(relayInfo.FirstResponseTime.UnixMilli()-relayInfo.StartTime.UnixMilli()))
-	if relayInfo.ReasoningEffort != "" {
-		other.SetPublic("reasoning_effort", relayInfo.ReasoningEffort)
-	}
+	// 始终落 reasoning_effort：客户端未指定、渠道也没注入时写空串，便于对账「缺省」情况。
+	other.SetPublic("reasoning_effort", relayInfo.ReasoningEffort)
 	if relayInfo.IsModelMapped {
 		other.SetPublic("is_model_mapped", true)
 		other.SetPublic("upstream_model_name", relayInfo.UpstreamModelName)

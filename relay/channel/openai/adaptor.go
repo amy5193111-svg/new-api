@@ -254,6 +254,7 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if request == nil {
 		return nil, errors.New("request is nil")
 	}
+	applyDefaultReasoningEffort(info, request)
 	if info.ChannelType != constant.ChannelTypeOpenAI && info.ChannelType != constant.ChannelTypeAzure {
 		request.StreamOptions = nil
 	}
@@ -841,4 +842,43 @@ func recordReasoningDiagnostics(c *gin.Context, info *relaycommon.RelayInfo, dia
 		diagnostics[i].From = info.RelayFormat
 	}
 	info.RecordConversionDiagnostics(c, diagnostics)
+}
+
+// applyDefaultReasoningEffort 按渠道设置注入默认思考档（顶层 reasoning_effort）。
+// 触发条件：渠道配置了 default_reasoning_effort；模型名命中 default_reasoning_effort_models
+// （约定为空则不限制）；客户端既未传顶层 reasoning_effort，也未传嵌套 reasoning.effort。
+// 客户端显式意图优先，注入后的值由 ConvertOpenAIRequest 里的 info.SetReasoningEffort 落进请求日志。
+func applyDefaultReasoningEffort(info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) {
+	if info == nil || request == nil {
+		return
+	}
+	effort := strings.TrimSpace(info.ChannelSetting.DefaultReasoningEffort)
+	if effort == "" {
+		return
+	}
+	if models := strings.TrimSpace(info.ChannelSetting.DefaultReasoningEffortModels); models != "" {
+		matched := false
+		for _, name := range strings.Split(models, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" && (name == request.Model || name == info.OriginModelName || name == info.UpstreamModelName) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return
+		}
+	}
+	if strings.TrimSpace(request.ReasoningEffort) != "" {
+		return
+	}
+	if len(request.Reasoning) > 0 {
+		var nested struct {
+			Effort string `json:"effort"`
+		}
+		if err := json.Unmarshal(request.Reasoning, &nested); err == nil && strings.TrimSpace(nested.Effort) != "" {
+			return
+		}
+	}
+	request.ReasoningEffort = effort
 }
