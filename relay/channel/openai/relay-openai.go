@@ -122,9 +122,17 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	seenStreamToolCalls := make(map[string]struct{})
 	var streamFunctionCallNames []string
 
+	// dsml_repair: 仅当渠道设置 dsml_repair=true 时启用。
+	// 上游偶尔把原生 DSML 工具调用协议当正文吐出（无 tool_calls），
+	// 这里把该文本块还原成标准 tool_calls 增量，普通正文按原样透传。
+	var dsmlRW *dsmlRewriter
+	if info.ChannelSetting.DsmlRepair {
+		dsmlRW = newDSMLRewriter()
+	}
+
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		if lastStreamData != "" {
-			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
+			if err := streamEmit(c, info, dsmlRW, lastStreamData); err != nil {
 				common.SysLog(common.LogText("error handling stream format: %s", err.Error()))
 				sr.Error(err)
 			}
@@ -177,7 +185,10 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
 		if shouldSendLastResp {
-			_ = sendStreamData(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
+			_ = streamEmit(c, info, dsmlRW, lastStreamData)
+		}
+		if dsmlRW != nil {
+			dsmlRW.Finish(c)
 		}
 	}
 

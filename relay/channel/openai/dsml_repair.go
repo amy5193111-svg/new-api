@@ -1,0 +1,416 @@
+package openai
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/relay/helper"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+
+	"github.com/gin-gonic/gin"
+)
+
+// dsml_repair: 把上游偶尔降级成纯文本的 DSML 工具调用块还原成标准 tool_calls。
+//
+// 线上真实泄漏字节（从用户会话历史里取出的原文，非推测）：
+//   '<' U+FF5C "DSML" U+FF5C ' ' "calls>"
+//   '<' U+FF5C "DSML" U+FF5C ' ' 'invoke name="run_code">'
+//   '<' U+FF5C "DSML" U+FF5C ' ' 'parameter name="code" string="true">' ... 值 ... '</' U+FF5C "DSML" U+FF5C "parameter>"
+//   '</' U+FF5C "DSML" U+FF5C "invoke>"
+//   '</' U+FF5C "DSML" U+FF5C "calls>"
+//
+// 设计要点：默认零改动透传；只有遇到标记才局部缓存。正文尾部最多暂留
+// dsmlMaxTail 字节用于判断是否半个标记，因此首字延迟不受影响。
+const (
+	dsmlPipe     = "\uff5c"
+	dsmlMaxTail  = 16
+	dsmlMaxBlock = 1 << 20
+)
+
+var dsmlHeads = []string{
+	"<" + dsmlPipe + "DSML" + dsmlPipe,
+	"</" + dsmlPipe + "DSML" + dsmlPipe,
+	"<|DSML|",
+	"</|DSML|",
+}
+
+type dsmlOp struct {
+	text  string
+	calls []dto.ToolCallResponse
+}
+
+type dsmlRewriter struct {
+	buf      string
+	inBlock  bool
+	sawBlock bool
+	toolSeq  int
+	id       string
+	model    string
+	created  int64
+}
+
+func newDSMLRewriter() *dsmlRewriter {
+	return &dsmlRewriter{}
+}
+
+func dsmlStrPtr(s string) *string { return &s }
+
+func (r *dsmlRewriter) emit(c *gin.Context, delta dto.ChatCompletionsStreamResponseChoiceDelta, finish *string) {
+	resp := dto.ChatCompletionsStreamResponse{
+		Id:      r.id,
+		Object:  "chat.completion.chunk",
+		Created: r.created,
+		Model:   r.model,
+		Choices: []dto.ChatCompletionsStreamResponseChoice{
+			{Index: 0, Delta: delta, FinishReason: finish},
+		},
+	}
+	if err := helper.ObjectData(c, resp); err != nil {
+		common.SysLog("dsml_repair: write chunk failed: " + err.Error())
+	}
+}
+
+// Feed 处理一个 SSE 数据块。无标记时走快路径，原样透传，字节级不变。
+func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
+	if strings.TrimSpace(data) == "" {
+		return nil
+	}
+	var chunk dto.ChatCompletionsStreamResponse
+	if err := common.UnmarshalJsonStr(data, &chunk); err != nil {
+		helper.StringData(c, data)
+		return nil
+	}
+	if r.id == "" {
+		r.id = chunk.Id
+		r.created = chunk.Created
+		r.model = chunk.Model
+	}
+
+	content := ""
+	reasoning := ""
+	finish := ""
+	for i := range chunk.Choices {
+		ch := chunk.Choices[i]
+		if ch.Delta.Content != nil {
+			content += *ch.Delta.Content
+		}
+		if ch.Delta.ReasoningContent != nil {
+			reasoning += *ch.Delta.ReasoningContent
+		}
+		if ch.FinishReason != nil && *ch.FinishReason != "" {
+			finish = *ch.FinishReason
+		}
+	}
+
+	// 快路径：无挂起状态、无标记字符、无需改 finish_reason -> 原样透传
+	if r.buf == "" && !r.inBlock &&
+		!strings.ContainsRune(content, '<') && !strings.ContainsRune(reasoning, '<') &&
+		!(r.sawBlock && finish != "") {
+		helper.StringData(c, data)
+		return nil
+	}
+
+	if reasoning != "" {
+		clean, removed := stripDsmlBlocks(reasoning)
+		if removed {
+			if clean != "" {
+				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(clean)}, nil)
+			}
+		} else {
+			r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(reasoning)}, nil)
+		}
+	}
+	if content != "" {
+		for _, op := range r.consume(content) {
+			if op.text != "" {
+				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(op.text)}, nil)
+			}
+			if len(op.calls) > 0 {
+				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: op.calls}, nil)
+			}
+		}
+	}
+	for i := range chunk.Choices {
+		if len(chunk.Choices[i].Delta.ToolCalls) > 0 {
+			r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: chunk.Choices[i].Delta.ToolCalls}, nil)
+		}
+	}
+	if finish != "" {
+		f := finish
+		if r.sawBlock && f == "stop" {
+			f = "tool_calls"
+		}
+		r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{}, dsmlStrPtr(f))
+	}
+	return nil
+}
+
+// Finish 冲刷剩余缓冲：块不完整时原样放行，绝不吞内容。
+func (r *dsmlRewriter) Finish(c *gin.Context) {
+	if r.buf != "" {
+		r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(r.buf)}, nil)
+		r.buf = ""
+	}
+	r.inBlock = false
+}
+
+// consume ???? ????????????????????????
+func (r *dsmlRewriter) consume(text string) []dsmlOp {
+	var ops []dsmlOp
+	r.buf += text
+	for {
+		if !r.inBlock {
+			idx, closing, body, end, ok := dsmlNext(r.buf, 0)
+			if !ok {
+				cut := dsmlSafeCut(r.buf)
+				if cut > 0 {
+					ops = appendDsmlText(ops, r.buf[:cut])
+					r.buf = r.buf[cut:]
+				}
+				return ops
+			}
+			if !closing && strings.HasPrefix(body, "calls") {
+				if idx > 0 {
+					ops = appendDsmlText(ops, r.buf[:idx])
+				}
+				r.buf = r.buf[idx:]
+				r.inBlock = true
+				continue
+			}
+			if idx > 0 {
+				ops = appendDsmlText(ops, r.buf[:idx])
+			}
+			r.buf = r.buf[end:]
+			continue
+		}
+
+		_, ce, ok := dsmlFindClose(r.buf, 0, "calls")
+		if ok {
+			block := r.buf[:ce]
+			r.buf = r.buf[ce:]
+			r.inBlock = false
+			r.sawBlock = true
+			if calls := parseDsmlBlock(block); len(calls) > 0 {
+				ops = append(ops, dsmlOp{calls: calls})
+			} else {
+				ops = appendDsmlText(ops, block)
+			}
+			continue
+		}
+		if len(r.buf) > dsmlMaxBlock {
+			ops = appendDsmlText(ops, r.buf)
+			r.buf = ""
+			r.inBlock = false
+		}
+		return ops
+	}
+}
+
+func appendDsmlText(ops []dsmlOp, t string) []dsmlOp {
+	if t == "" {
+		return ops
+	}
+	if n := len(ops); n > 0 && len(ops[n-1].calls) == 0 {
+		ops[n-1].text += t
+		return ops
+	}
+	return append(ops, dsmlOp{text: t})
+}
+
+func parseDsmlBlock(block string) []dto.ToolCallResponse {
+	var out []dto.ToolCallResponse
+	pos := 0
+	for {
+		_, closing, body, end, ok := dsmlNext(block, pos)
+		if !ok {
+			break
+		}
+		pos = end
+		if closing || !strings.HasPrefix(body, "invoke") {
+			continue
+		}
+		name := dsmlAttr(body, "name")
+		if name == "" {
+			continue
+		}
+		args := map[string]any{}
+		for {
+			_, cl2, b2, e2, ok2 := dsmlNext(block, pos)
+			if !ok2 {
+				break
+			}
+			pos = e2
+			if cl2 {
+				if strings.HasPrefix(b2, "invoke") {
+					break
+				}
+				continue
+			}
+			if !strings.HasPrefix(b2, "parameter") {
+				continue
+			}
+			pname := dsmlAttr(b2, "name")
+			if pname == "" {
+				continue
+			}
+			cs, ce, ok3 := dsmlFindClose(block, pos, "parameter")
+			if !ok3 {
+				break
+			}
+			val := block[pos:cs]
+			pos = ce
+			if dsmlAttr(b2, "string") == "false" {
+				var v any
+				if err := common.UnmarshalJsonStr(strings.TrimSpace(val), &v); err == nil {
+					args[pname] = v
+				} else {
+					args[pname] = val
+				}
+			} else {
+				args[pname] = val
+			}
+		}
+		b, err := json.Marshal(args)
+		if err != nil {
+			b = []byte("{}")
+		}
+		idx := len(out)
+		out = append(out, dto.ToolCallResponse{
+			Index: &idx,
+			ID:    fmt.Sprintf("call_dsml_%d_%d", time.Now().UnixNano(), idx),
+			Type:  "function",
+			Function: dto.FunctionResponse{
+				Name:      name,
+				Arguments: string(b),
+			},
+		})
+	}
+	return out
+}
+
+// dsmlNext ????? from ?????????????????
+func dsmlNext(s string, from int) (idx int, closing bool, body string, end int, ok bool) {
+	pipe := dsmlPipe + "DSML" + dsmlPipe
+	alt := "|DSML|"
+	for i := from; i < len(s); i++ {
+		if s[i] != '<' {
+			continue
+		}
+		j := i + 1
+		isClose := false
+		if j < len(s) && s[j] == '/' {
+			isClose = true
+			j++
+		}
+		after := -1
+		if strings.HasPrefix(s[j:], pipe) {
+			after = j + len(pipe)
+		} else if strings.HasPrefix(s[j:], alt) {
+			after = j + len(alt)
+		}
+		if after < 0 {
+			continue
+		}
+		gt := strings.IndexByte(s[after:], '>')
+		if gt < 0 {
+			return 0, false, "", 0, false
+		}
+		return i, isClose, strings.TrimSpace(s[after : after+gt]), after + gt + 1, true
+	}
+	return 0, false, "", 0, false
+}
+
+func dsmlFindClose(s string, from int, name string) (start int, end int, ok bool) {
+	pos := from
+	for {
+		idx, closing, body, e, ok2 := dsmlNext(s, pos)
+		if !ok2 {
+			return 0, 0, false
+		}
+		if closing && strings.HasPrefix(body, name) {
+			return idx, e, true
+		}
+		pos = e
+	}
+}
+
+func dsmlAttr(body, key string) string {
+	k := key + "=\""
+	i := strings.Index(body, k)
+	if i < 0 {
+		return ""
+	}
+	j := i + len(k)
+	e := strings.IndexByte(body[j:], '"')
+	if e < 0 {
+		return ""
+	}
+	return body[j : j+e]
+}
+
+// dsmlSafeCut ?????????????????????????? DSLM ??
+func dsmlSafeCut(s string) int {
+	limit := len(s) - dsmlMaxTail
+	if limit < 0 {
+		limit = 0
+	}
+	for i := len(s) - 1; i >= limit; i-- {
+		if s[i] != '<' {
+			continue
+		}
+		tail := s[i:]
+		for _, h := range dsmlHeads {
+			if len(tail) < len(h) && strings.HasPrefix(h, tail) {
+				return i
+			}
+			if strings.HasPrefix(tail, h) && !strings.ContainsRune(tail, '>') {
+				return i
+			}
+		}
+	}
+	return len(s)
+}
+
+// stripDsmlBlocks ??????????? DSML ?????? reasoning_content ???
+func stripDsmlBlocks(s string) (string, bool) {
+	if !strings.Contains(s, "DSML") {
+		return s, false
+	}
+	var out strings.Builder
+	pos := 0
+	removed := false
+	for {
+		idx, closing, body, end, ok := dsmlNext(s, pos)
+		if !ok {
+			break
+		}
+		out.WriteString(s[pos:idx])
+		if !closing && strings.HasPrefix(body, "calls") {
+			_, ce, ok2 := dsmlFindClose(s, end, "calls")
+			if !ok2 {
+				out.WriteString(s[idx:end])
+				pos = end
+				continue
+			}
+			pos = ce
+			removed = true
+			continue
+		}
+		pos = end
+		removed = true
+	}
+	out.WriteString(s[pos:])
+	return out.String(), removed
+}
+
+// streamEmit ?? SSE ??????? dsml_repair ????????????
+func streamEmit(c *gin.Context, info *relaycommon.RelayInfo, rw *dsmlRewriter, data string) error {
+	if rw != nil {
+		return rw.Feed(c, data)
+	}
+	return HandleStreamFormat(c, info, data, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
+}
