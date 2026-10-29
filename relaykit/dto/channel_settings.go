@@ -16,6 +16,7 @@ type ChannelSettings struct {
 	ForceFormat               bool   `json:"force_format,omitempty"`
 	ThinkingToContent         bool   `json:"thinking_to_content,omitempty"`
 	DsmlRepair                bool   `json:"dsml_repair,omitempty"`
+	DsmlRepairCount           *bool  `json:"dsml_repair_count,omitempty"`
 	// DefaultReasoningEffort 在客户端未显式指定思考档时，为该渠道请求注入顶层
 	// reasoning_effort（上游可识别的字符串，如 low/medium/high）。空值=不注入。
 	DefaultReasoningEffort string `json:"default_reasoning_effort,omitempty"`

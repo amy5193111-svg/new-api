@@ -51,10 +51,16 @@ type dsmlRewriter struct {
 	id       string
 	model    string
 	created  int64
+
+	// 命中计数：仅当 countOn 为真时才累计并落日志，关闭后零写入
+	countOn bool
+	blocks  int
+	failed  int
+	tools   []string
 }
 
-func newDSMLRewriter() *dsmlRewriter {
-	return &dsmlRewriter{}
+func newDSMLRewriter(countOn bool) *dsmlRewriter {
+	return &dsmlRewriter{countOn: countOn}
 }
 
 func dsmlStrPtr(s string) *string { return &s }
@@ -149,13 +155,25 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 	return nil
 }
 
-// Finish 冲刷剩余缓冲：块不完整时原样放行，绝不吞内容。
-func (r *dsmlRewriter) Finish(c *gin.Context) {
+// Finish 冲刷尾部残留；若开启命中计数且本次确有命中，只写一行汇总日志。
+// 注意：计数关闭时这里完全不产生任何日志（零写入）。
+func (r *dsmlRewriter) Finish(c *gin.Context, info *relaycommon.RelayInfo) {
 	if r.buf != "" {
 		r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(r.buf)}, nil)
 		r.buf = ""
 	}
 	r.inBlock = false
+	if !r.countOn || (r.blocks == 0 && r.failed == 0) {
+		return
+	}
+	ch, model, up := 0, "", ""
+	if info != nil {
+		ch = info.ChannelId
+		model = info.OriginModelName
+		up = info.UpstreamModelName
+	}
+	common.SysLog(fmt.Sprintf("dsml_repair hit ch=%d model=%s upstream=%s blocks=%d failed=%d tools=%s",
+		ch, model, up, r.blocks, r.failed, strings.Join(r.tools, ",")))
 }
 
 // consume ???? ????????????????????????
@@ -196,8 +214,19 @@ func (r *dsmlRewriter) consume(text string) []dsmlOp {
 			r.sawBlock = true
 			if calls := parseDsmlBlock(block); len(calls) > 0 {
 				ops = append(ops, dsmlOp{calls: calls})
+				if r.countOn {
+					r.blocks++
+					for _, cl := range calls {
+						if len(r.tools) < 5 {
+							r.tools = append(r.tools, cl.Function.Name)
+						}
+					}
+				}
 			} else {
 				ops = appendDsmlText(ops, block)
+				if r.countOn {
+					r.failed++
+				}
 			}
 			continue
 		}

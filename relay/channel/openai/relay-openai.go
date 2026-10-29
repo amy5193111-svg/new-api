@@ -127,7 +127,9 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	// 这里把该文本块还原成标准 tool_calls 增量，普通正文按原样透传。
 	var dsmlRW *dsmlRewriter
 	if info.ChannelSetting.DsmlRepair {
-		dsmlRW = newDSMLRewriter()
+		// 命中计数默认开启：未配置 dsml_repair_count 时视为 true
+		countOn := info.ChannelSetting.DsmlRepairCount == nil || *info.ChannelSetting.DsmlRepairCount
+		dsmlRW = newDSMLRewriter(countOn)
 	}
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
@@ -188,7 +190,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			_ = streamEmit(c, info, dsmlRW, lastStreamData)
 		}
 		if dsmlRW != nil {
-			dsmlRW.Finish(c)
+			dsmlRW.Finish(c, info)
 		}
 	}
 
