@@ -63,6 +63,8 @@ type dsmlRewriter struct {
 	failed  int
 	tools   []string
 	sample  string
+	near       int
+	nearSample string
 }
 
 func newDSMLRewriter(countOn bool) *dsmlRewriter {
@@ -76,8 +78,8 @@ func (r *dsmlRewriter) markFailed(b string) {
 	r.failed++
 	if r.sample == "" {
 		s := b
-		if len(s) > 100 {
-			s = s[:100]
+		if len(s) > 800 {
+			s = s[:800]
 		}
 		r.sample = strings.ReplaceAll(strings.ReplaceAll(s, "\n", " "), "\r", " ")
 	}
@@ -135,11 +137,13 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 	// 快路径：无挂起缓冲、无标记字符、无需改 finish_reason -> 原样透传
 	if r.cs.buf == "" && !r.cs.inBlock && r.rs.buf == "" && !r.rs.inBlock &&
 		!strings.ContainsRune(content, '<') && !strings.ContainsRune(reasoning, '<') &&
+		!strings.Contains(content, "DSML") && !strings.Contains(reasoning, "DSML") &&
 		!((r.cs.sawBlock || r.rs.sawBlock) && finish != "") {
 		helper.StringData(c, data)
 		return nil
 	}
 
+	b0, f0 := r.blocks, r.failed
 	if reasoning != "" {
 		for _, op := range r.flow(&r.rs, reasoning) {
 			if op.text != "" {
@@ -165,6 +169,28 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 			r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: chunk.Choices[i].Delta.ToolCalls}, nil)
 		}
 	}
+	// 近似命中：文本里出现 DSML 字样但没被状态机识别（形态不同/半角圆括号被替换等），
+	// 只留痕不处理，用来定位上游到底吐的是什么形态。
+	if r.countOn && r.blocks == b0 && r.failed == f0 &&
+		(strings.Contains(content, "DSML") || strings.Contains(reasoning, "DSML")) {
+		if r.nearSample == "" {
+			all := content
+			if all == "" {
+				all = reasoning
+			}
+			seg := all
+			if i := strings.Index(seg, "DSML"); i > 60 {
+				seg = seg[i-60:]
+			}
+			if len(seg) > 120 {
+				seg = seg[:120]
+			}
+			r.nearSample = strings.ReplaceAll(strings.ReplaceAll(seg, "\n", " "), "\r", " ")
+		}
+		if r.near < 9 {
+			r.near++
+		}
+	}
 	if finish != "" {
 		f := finish
 		if (r.cs.sawBlock || r.rs.sawBlock) && f == "stop" {
@@ -176,21 +202,24 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 }
 
 func (r *dsmlRewriter) Finish(c *gin.Context, info *relaycommon.RelayInfo) {
+	// 未闭合的块一律丢弃，不再原样吐给客户端（拦截外显）；只记 failed + 样本。
 	if r.cs.buf != "" {
-		r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(r.cs.buf)}, nil)
 		if r.cs.inBlock {
 			r.markFailed(r.cs.buf)
+		} else {
+			r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(r.cs.buf)}, nil)
 		}
 		r.cs = dsmlState{}
 	}
 	if r.rs.buf != "" {
-		r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(r.rs.buf)}, nil)
 		if r.rs.inBlock {
 			r.markFailed(r.rs.buf)
+		} else {
+			r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(r.rs.buf)}, nil)
 		}
 		r.rs = dsmlState{}
 	}
-	if !r.countOn || (r.blocks == 0 && r.failed == 0) {
+	if !r.countOn || (r.blocks == 0 && r.failed == 0 && r.near == 0) {
 		return
 	}
 	ch, model, up := 0, "", ""
@@ -203,8 +232,12 @@ func (r *dsmlRewriter) Finish(c *gin.Context, info *relaycommon.RelayInfo) {
 	if r.sample != "" {
 		sample = fmt.Sprintf(" sample=%q", r.sample)
 	}
-	common.SysLog(fmt.Sprintf("dsml_repair hit ch=%d model=%s upstream=%s blocks=%d failed=%d tools=%s%s",
-		ch, model, up, r.blocks, r.failed, strings.Join(r.tools, ","), sample))
+	near := ""
+	if r.near > 0 {
+		near = fmt.Sprintf(" near=%d nearSample=%q", r.near, r.nearSample)
+	}
+	common.SysLog(fmt.Sprintf("dsml_repair hit ch=%d model=%s upstream=%s blocks=%d failed=%d tools=%s%s%s",
+		ch, model, up, r.blocks, r.failed, strings.Join(r.tools, ","), sample, near))
 }
 
 func (r *dsmlRewriter) flow(st *dsmlState, text string) []dsmlOp {
