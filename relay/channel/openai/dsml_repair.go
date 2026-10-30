@@ -65,6 +65,7 @@ type dsmlRewriter struct {
 	sample  string
 	near       int
 	nearSample string
+	emittedCalls int
 }
 
 func newDSMLRewriter(countOn bool) *dsmlRewriter {
@@ -150,6 +151,7 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(op.text)}, nil)
 			}
 			if len(op.calls) > 0 {
+				r.emittedCalls++
 				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: op.calls}, nil)
 			}
 		}
@@ -160,6 +162,7 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(op.text)}, nil)
 			}
 			if len(op.calls) > 0 {
+				r.emittedCalls++
 				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: op.calls}, nil)
 			}
 		}
@@ -185,15 +188,15 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 			if len(seg) > 120 {
 				seg = seg[:120]
 			}
-			r.nearSample = strings.ReplaceAll(strings.ReplaceAll(seg, "\n", " "), "\r", " ")
-		}
+      r.nearSample = seg
+    }
 		if r.near < 9 {
 			r.near++
 		}
 	}
 	if finish != "" {
 		f := finish
-		if (r.cs.sawBlock || r.rs.sawBlock) && f == "stop" {
+		if (r.cs.sawBlock || r.rs.sawBlock) && f == "stop" && r.emittedCalls > 0 {
 			f = "tool_calls"
 		}
 		r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{}, dsmlStrPtr(f))
@@ -201,10 +204,16 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 	return nil
 }
 
+// isCallLike 判断未闭合块是否像一次真实工具调用：含 invoke/parameter 才丢，
+// 纯引用（如汇报里写的 <|DSML|calls> ...）照常当文本发出，避免吞内容。
+func isCallLike(b string) bool {
+	return strings.Contains(b, "invoke") || strings.Contains(b, "parameter")
+}
+
 func (r *dsmlRewriter) Finish(c *gin.Context, info *relaycommon.RelayInfo) {
-	// 未闭合的块一律丢弃，不再原样吐给客户端（拦截外显）；只记 failed + 样本。
+	// 未闭合块：像真实调用（含 invoke/parameter）就丢弃并计 failed；纯引用则照常发出。
 	if r.cs.buf != "" {
-		if r.cs.inBlock {
+		if r.cs.inBlock && isCallLike(r.cs.buf) {
 			r.markFailed(r.cs.buf)
 		} else {
 			r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(r.cs.buf)}, nil)
@@ -212,7 +221,7 @@ func (r *dsmlRewriter) Finish(c *gin.Context, info *relaycommon.RelayInfo) {
 		r.cs = dsmlState{}
 	}
 	if r.rs.buf != "" {
-		if r.rs.inBlock {
+		if r.rs.inBlock && isCallLike(r.rs.buf) {
 			r.markFailed(r.rs.buf)
 		} else {
 			r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(r.rs.buf)}, nil)
@@ -286,8 +295,15 @@ func (r *dsmlRewriter) flow(st *dsmlState, text string) []dsmlOp {
 					}
 				}
 			} else {
-				ops = appendDsmlText(ops, block)
+				// 块完整但解析不出工具调用：视为协议残渣，直接丢弃，不外显。
 				r.markFailed(block)
+				if r.nearSample == "" {
+					s := block
+					if len(s) > 800 {
+						s = s[:800]
+					}
+					r.nearSample = s
+				}
 			}
 			continue
 		}
