@@ -31,11 +31,20 @@ const (
 	dsmlMaxBlock = 1 << 20
 )
 
+var dsmlPipes = []string{"|", "\uFF5C", "\u2502", "\u2223", "\uFE31"}
+
 var dsmlHeads = []string{
 	"<" + dsmlPipe + "DSML" + dsmlPipe,
 	"</" + dsmlPipe + "DSML" + dsmlPipe,
 	"<|DSML|",
 	"</|DSML|",
+	"<" + dsmlPipe + "DSML",
+	"</" + dsmlPipe + "DSML",
+	"<|DSML",
+	"</|DSML",
+	"\uFF1C",
+	"\uFF1C/",
+	"<",
 }
 
 type dsmlOp struct {
@@ -138,6 +147,7 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 	// 快路径：无挂起缓冲、无标记字符、无需改 finish_reason -> 原样透传
 	if r.cs.buf == "" && !r.cs.inBlock && r.rs.buf == "" && !r.rs.inBlock &&
 		!strings.ContainsRune(content, '<') && !strings.ContainsRune(reasoning, '<') &&
+		!strings.Contains(content, "\uFF1C") && !strings.Contains(reasoning, "\uFF1C") &&
 		!strings.Contains(content, "DSML") && !strings.Contains(reasoning, "DSML") &&
 		!((r.cs.sawBlock || r.rs.sawBlock) && finish != "") {
 		helper.StringData(c, data)
@@ -399,34 +409,67 @@ func parseDsmlBlock(block string) []dto.ToolCallResponse {
 	return out
 }
 
-// dsmlNext ????? from ?????????????????
+// dsmlSkipPad 跳过竖线/空白类填充，返回下一个有效字符的下标。
+func dsmlSkipPad(s string, p int) int {
+	for p < len(s) {
+		if s[p] == ' ' || s[p] == '\t' || s[p] == '\r' || s[p] == '\n' {
+			p++
+			continue
+		}
+		moved := false
+		for _, pi := range dsmlPipes {
+			if strings.HasPrefix(s[p:], pi) {
+				p += len(pi)
+				moved = true
+				break
+			}
+		}
+		if !moved {
+			return p
+		}
+	}
+	return p
+}
+
+// dsmlNext 找下一个 DSML 标签。容忍全角/半角竖线混搭、竖线与 DSML 之间夹空格、
+// 竖线缺失、全角尖括号。返回标签起点、是否闭合、标签体、标签结束下标。
 func dsmlNext(s string, from int) (idx int, closing bool, body string, end int, ok bool) {
-	pipe := dsmlPipe + "DSML" + dsmlPipe
-	alt := "|DSML|"
 	for i := from; i < len(s); i++ {
-		if s[i] != '<' {
+		lt := 0
+		if s[i] == '<' {
+			lt = 1
+		} else if strings.HasPrefix(s[i:], "\uFF1C") {
+			lt = len("\uFF1C")
+		} else {
 			continue
 		}
-		j := i + 1
-		isClose := false
-		if j < len(s) && s[j] == '/' {
-			isClose = true
-			j++
+		p := i + lt
+		cl := 0
+		if strings.HasPrefix(s[p:], "/") {
+			cl = 1
+		} else if strings.HasPrefix(s[p:], "\uFF0F") {
+			cl = len("\uFF0F")
 		}
-		after := -1
-		if strings.HasPrefix(s[j:], pipe) {
-			after = j + len(pipe)
-		} else if strings.HasPrefix(s[j:], alt) {
-			after = j + len(alt)
-		}
-		if after < 0 {
+		q := dsmlSkipPad(s, p+cl)
+		if q+4 > len(s) || !strings.EqualFold(s[q:q+4], "DSML") {
 			continue
 		}
-		gt := strings.IndexByte(s[after:], '>')
-		if gt < 0 {
+		r := dsmlSkipPad(s, q+4)
+		gtIdx, gtLen := -1, 0
+		for x := r; x < len(s) && x-r <= 200; x++ {
+			if s[x] == '>' {
+				gtIdx, gtLen = x, 1
+				break
+			}
+			if strings.HasPrefix(s[x:], "\uFF1E") {
+				gtIdx, gtLen = x, len("\uFF1E")
+				break
+			}
+		}
+		if gtIdx < 0 {
 			return 0, false, "", 0, false
 		}
-		return i, isClose, strings.TrimSpace(s[after : after+gt]), after + gt + 1, true
+		return i, cl > 0, strings.TrimSpace(s[r:gtIdx]), gtIdx + gtLen, true
 	}
 	return 0, false, "", 0, false
 }
@@ -466,7 +509,7 @@ func dsmlSafeCut(s string) int {
 		limit = 0
 	}
 	for i := len(s) - 1; i >= limit; i-- {
-		if s[i] != '<' {
+		if s[i] != '<' && s[i] != 0xEF {
 			continue
 		}
 		tail := s[i:]
