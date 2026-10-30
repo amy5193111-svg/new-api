@@ -43,24 +43,44 @@ type dsmlOp struct {
 	calls []dto.ToolCallResponse
 }
 
-type dsmlRewriter struct {
+
+type dsmlState struct {
 	buf      string
 	inBlock  bool
 	sawBlock bool
-	toolSeq  int
-	id       string
-	model    string
-	created  int64
+}
 
-	// 命中计数：仅当 countOn 为真时才累计并落日志，关闭后零写入
+type dsmlRewriter struct {
+	cs      dsmlState
+	rs      dsmlState
+	toolSeq int
+	id      string
+	model   string
+	created int64
+
 	countOn bool
 	blocks  int
 	failed  int
 	tools   []string
+	sample  string
 }
 
 func newDSMLRewriter(countOn bool) *dsmlRewriter {
 	return &dsmlRewriter{countOn: countOn}
+}
+
+func (r *dsmlRewriter) markFailed(b string) {
+	if !r.countOn {
+		return
+	}
+	r.failed++
+	if r.sample == "" {
+		s := b
+		if len(s) > 100 {
+			s = s[:100]
+		}
+		r.sample = strings.ReplaceAll(strings.ReplaceAll(s, "\n", " "), "\r", " ")
+	}
 }
 
 func dsmlStrPtr(s string) *string { return &s }
@@ -112,26 +132,26 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 		}
 	}
 
-	// 快路径：无挂起状态、无标记字符、无需改 finish_reason -> 原样透传
-	if r.buf == "" && !r.inBlock &&
+	// 快路径：无挂起缓冲、无标记字符、无需改 finish_reason -> 原样透传
+	if r.cs.buf == "" && !r.cs.inBlock && r.rs.buf == "" && !r.rs.inBlock &&
 		!strings.ContainsRune(content, '<') && !strings.ContainsRune(reasoning, '<') &&
-		!(r.sawBlock && finish != "") {
+		!((r.cs.sawBlock || r.rs.sawBlock) && finish != "") {
 		helper.StringData(c, data)
 		return nil
 	}
 
 	if reasoning != "" {
-		clean, removed := stripDsmlBlocks(reasoning)
-		if removed {
-			if clean != "" {
-				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(clean)}, nil)
+		for _, op := range r.flow(&r.rs, reasoning) {
+			if op.text != "" {
+				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(op.text)}, nil)
 			}
-		} else {
-			r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(reasoning)}, nil)
+			if len(op.calls) > 0 {
+				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: op.calls}, nil)
+			}
 		}
 	}
 	if content != "" {
-		for _, op := range r.consume(content) {
+		for _, op := range r.flow(&r.cs, content) {
 			if op.text != "" {
 				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(op.text)}, nil)
 			}
@@ -147,7 +167,7 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 	}
 	if finish != "" {
 		f := finish
-		if r.sawBlock && f == "stop" {
+		if (r.cs.sawBlock || r.rs.sawBlock) && f == "stop" {
 			f = "tool_calls"
 		}
 		r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{}, dsmlStrPtr(f))
@@ -155,14 +175,21 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 	return nil
 }
 
-// Finish 冲刷尾部残留；若开启命中计数且本次确有命中，只写一行汇总日志。
-// 注意：计数关闭时这里完全不产生任何日志（零写入）。
 func (r *dsmlRewriter) Finish(c *gin.Context, info *relaycommon.RelayInfo) {
-	if r.buf != "" {
-		r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(r.buf)}, nil)
-		r.buf = ""
+	if r.cs.buf != "" {
+		r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(r.cs.buf)}, nil)
+		if r.cs.inBlock {
+			r.markFailed(r.cs.buf)
+		}
+		r.cs = dsmlState{}
 	}
-	r.inBlock = false
+	if r.rs.buf != "" {
+		r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(r.rs.buf)}, nil)
+		if r.rs.inBlock {
+			r.markFailed(r.rs.buf)
+		}
+		r.rs = dsmlState{}
+	}
 	if !r.countOn || (r.blocks == 0 && r.failed == 0) {
 		return
 	}
@@ -172,46 +199,49 @@ func (r *dsmlRewriter) Finish(c *gin.Context, info *relaycommon.RelayInfo) {
 		model = info.OriginModelName
 		up = info.UpstreamModelName
 	}
-	common.SysLog(fmt.Sprintf("dsml_repair hit ch=%d model=%s upstream=%s blocks=%d failed=%d tools=%s",
-		ch, model, up, r.blocks, r.failed, strings.Join(r.tools, ",")))
+	sample := ""
+	if r.sample != "" {
+		sample = fmt.Sprintf(" sample=%q", r.sample)
+	}
+	common.SysLog(fmt.Sprintf("dsml_repair hit ch=%d model=%s upstream=%s blocks=%d failed=%d tools=%s%s",
+		ch, model, up, r.blocks, r.failed, strings.Join(r.tools, ","), sample))
 }
 
-// consume ???? ????????????????????????
-func (r *dsmlRewriter) consume(text string) []dsmlOp {
+func (r *dsmlRewriter) flow(st *dsmlState, text string) []dsmlOp {
 	var ops []dsmlOp
-	r.buf += text
+	st.buf += text
 	for {
-		if !r.inBlock {
-			idx, closing, body, end, ok := dsmlNext(r.buf, 0)
+		if !st.inBlock {
+			idx, closing, body, end, ok := dsmlNext(st.buf, 0)
 			if !ok {
-				cut := dsmlSafeCut(r.buf)
+				cut := dsmlSafeCut(st.buf)
 				if cut > 0 {
-					ops = appendDsmlText(ops, r.buf[:cut])
-					r.buf = r.buf[cut:]
+					ops = appendDsmlText(ops, st.buf[:cut])
+					st.buf = st.buf[cut:]
 				}
 				return ops
 			}
 			if !closing && strings.HasPrefix(body, "calls") {
 				if idx > 0 {
-					ops = appendDsmlText(ops, r.buf[:idx])
+					ops = appendDsmlText(ops, st.buf[:idx])
 				}
-				r.buf = r.buf[idx:]
-				r.inBlock = true
+				st.buf = st.buf[idx:]
+				st.inBlock = true
 				continue
 			}
 			if idx > 0 {
-				ops = appendDsmlText(ops, r.buf[:idx])
+				ops = appendDsmlText(ops, st.buf[:idx])
 			}
-			r.buf = r.buf[end:]
+			st.buf = st.buf[end:]
 			continue
 		}
 
-		_, ce, ok := dsmlFindClose(r.buf, 0, "calls")
+		_, ce, ok := dsmlFindClose(st.buf, 0, "calls")
 		if ok {
-			block := r.buf[:ce]
-			r.buf = r.buf[ce:]
-			r.inBlock = false
-			r.sawBlock = true
+			block := st.buf[:ce]
+			st.buf = st.buf[ce:]
+			st.inBlock = false
+			st.sawBlock = true
 			if calls := parseDsmlBlock(block); len(calls) > 0 {
 				ops = append(ops, dsmlOp{calls: calls})
 				if r.countOn {
@@ -224,16 +254,15 @@ func (r *dsmlRewriter) consume(text string) []dsmlOp {
 				}
 			} else {
 				ops = appendDsmlText(ops, block)
-				if r.countOn {
-					r.failed++
-				}
+				r.markFailed(block)
 			}
 			continue
 		}
-		if len(r.buf) > dsmlMaxBlock {
-			ops = appendDsmlText(ops, r.buf)
-			r.buf = ""
-			r.inBlock = false
+		if len(st.buf) > dsmlMaxBlock {
+			ops = appendDsmlText(ops, st.buf)
+			r.markFailed(st.buf)
+			st.buf = ""
+			st.inBlock = false
 		}
 		return ops
 	}
