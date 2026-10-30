@@ -223,18 +223,24 @@ func isCallLike(b string) bool {
 func (r *dsmlRewriter) Finish(c *gin.Context, info *relaycommon.RelayInfo) {
 	// 未闭合块：像真实调用（含 invoke/parameter）就丢弃并计 failed；纯引用则照常发出。
 	if r.cs.buf != "" {
-		if r.cs.inBlock && isCallLike(r.cs.buf) {
-			r.markFailed(r.cs.buf)
+		raw := r.cs.buf
+		if clean := dsmlScrub(raw); clean != "" {
+			r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(clean)}, nil)
+		} else if isCallLike(raw) {
+			r.markFailed(raw)
 		} else {
-			r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(r.cs.buf)}, nil)
+			r.noteNear(raw)
 		}
 		r.cs = dsmlState{}
 	}
 	if r.rs.buf != "" {
-		if r.rs.inBlock && isCallLike(r.rs.buf) {
-			r.markFailed(r.rs.buf)
+		raw := r.rs.buf
+		if clean := dsmlScrub(raw); clean != "" {
+			r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(clean)}, nil)
+		} else if isCallLike(raw) {
+			r.markFailed(raw)
 		} else {
-			r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(r.rs.buf)}, nil)
+			r.noteNear(raw)
 		}
 		r.rs = dsmlState{}
 	}
@@ -327,7 +333,54 @@ func (r *dsmlRewriter) flow(st *dsmlState, text string) []dsmlOp {
 	}
 }
 
+// dsmlScrub 从文本中剔除所有 DSML 标记（含未闭合残片），确保协议串不外显。
+func dsmlScrub(s string) string {
+	if s == "" {
+		return s
+	}
+	var b strings.Builder
+	rest := s
+	for {
+		idx, _, _, end, ok := dsmlNext(rest, 0)
+		if !ok {
+			break
+		}
+		b.WriteString(rest[:idx])
+		if end <= idx {
+			break
+		}
+		rest = rest[end:]
+	}
+	b.WriteString(rest)
+	out := b.String()
+	if k := strings.LastIndex(out, "<"); k >= 0 && strings.Contains(strings.ToUpper(out[k:]), "DSML") {
+		out = out[:k]
+	}
+	if k := strings.LastIndex(out, "＜"); k >= 0 && strings.Contains(strings.ToUpper(out[k:]), "DSML") {
+		out = out[:k]
+	}
+	return out
+}
+
+// noteNear 记一次近似命中（文本里出现 DSML 但未构成块）。
+func (r *dsmlRewriter) noteNear(raw string) {
+	if !r.countOn || raw == "" {
+		return
+	}
+	if r.near < 99 {
+		r.near++
+	}
+	if r.nearSample == "" {
+		s := raw
+		if len(s) > 800 {
+			s = s[:800]
+		}
+		r.nearSample = s
+	}
+}
+
 func appendDsmlText(ops []dsmlOp, t string) []dsmlOp {
+	t = dsmlScrub(t)
 	if t == "" {
 		return ops
 	}
