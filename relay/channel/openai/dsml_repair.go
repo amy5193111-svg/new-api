@@ -161,6 +161,9 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: dsmlStrPtr(op.text)}, nil)
 			}
 			if len(op.calls) > 0 {
+				for _, tc := range op.calls {
+					common.SysLog(fmt.Sprintf("dsml_repair emit id=%s name=%s args_len=%d blocks=%d", tc.ID, tc.Function.Name, len(tc.Function.Arguments), r.blocks))
+				}
 				r.emittedCalls++
 				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: op.calls}, nil)
 			}
@@ -172,6 +175,9 @@ func (r *dsmlRewriter) Feed(c *gin.Context, data string) error {
 				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{Content: dsmlStrPtr(op.text)}, nil)
 			}
 			if len(op.calls) > 0 {
+				for _, tc := range op.calls {
+					common.SysLog(fmt.Sprintf("dsml_repair emit id=%s name=%s args_len=%d blocks=%d", tc.ID, tc.Function.Name, len(tc.Function.Arguments), r.blocks))
+				}
 				r.emittedCalls++
 				r.emit(c, dto.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: op.calls}, nil)
 			}

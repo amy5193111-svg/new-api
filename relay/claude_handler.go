@@ -187,7 +187,9 @@ func hardenClaudeToolPairs(req *dto.ClaudeRequest) {
 			}
 			t, _ := b["type"].(string)
 			id, _ := b["id"].(string)
-			if t != "tool_use" || id == "" {
+			// 只管我们自己造的调用 id（DSML 修复产物），
+			// 真实 Claude 客户端的 toolu_ 类 id 一律不动。
+			if t != "tool_use" || id == "" || !strings.HasPrefix(id, "call_dsml_") {
 				kept = append(kept, raw)
 				continue
 			}
