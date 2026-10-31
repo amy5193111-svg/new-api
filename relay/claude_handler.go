@@ -41,7 +41,7 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 
 	// 历史里若存在没有 tool_result 的 tool_use（客户端漏回传、重复 id 等），
 	// 下游会直接 400（tool_use ids ... without tool_result），这里先补齐/去重。
-	hardenClaudeToolPairs(claudeReq)
+	hardenClaudeToolPairs(request)
 	if err := helper.ApplyReasoningModelSuffix(c, info, request); err != nil {
 		return newConvertRequestFailedError(c, info, err)
 	}
