@@ -38,6 +38,10 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
 	}
+
+	// 历史里若存在没有 tool_result 的 tool_use（客户端漏回传、重复 id 等），
+	// 下游会直接 400（tool_use ids ... without tool_result），这里先补齐/去重。
+	hardenClaudeToolPairs(claudeReq)
 	if err := helper.ApplyReasoningModelSuffix(c, info, request); err != nil {
 		return newConvertRequestFailedError(c, info, err)
 	}
@@ -154,4 +158,106 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 
 	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
 	return nil
+}
+
+// hardenClaudeToolPairs 保证每条 assistant 消息里的 tool_use 在下一条 user 消息里
+// 都有对应的 tool_result：缺失的补一条占位结果，重复 id 的只保留第一次出现。
+// 目的：避免上游以 "tool_use ids were found without tool_result" 直接拒绝整轮请求。
+func hardenClaudeToolPairs(req *dto.ClaudeRequest) {
+	if req == nil || len(req.Messages) == 0 {
+		return
+	}
+	msgs := req.Messages
+	for i := 0; i < len(msgs); i++ {
+		if msgs[i].Role != "assistant" {
+			continue
+		}
+		blocks, ok := msgs[i].Content.([]any)
+		if !ok || len(blocks) == 0 {
+			continue
+		}
+		uses := make([]string, 0, len(blocks))
+		seen := make(map[string]struct{}, len(blocks))
+		kept := make([]any, 0, len(blocks))
+		for _, raw := range blocks {
+			b, isMap := raw.(map[string]any)
+			if !isMap {
+				kept = append(kept, raw)
+				continue
+			}
+			t, _ := b["type"].(string)
+			id, _ := b["id"].(string)
+			if t != "tool_use" || id == "" {
+				kept = append(kept, raw)
+				continue
+			}
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			uses = append(uses, id)
+			kept = append(kept, raw)
+		}
+		if len(uses) == 0 {
+			continue
+		}
+		msgs[i].Content = kept
+
+		next := -1
+		for j := i + 1; j < len(msgs); j++ {
+			if msgs[j].Role == "user" {
+				next = j
+				break
+			}
+		}
+		found := make(map[string]struct{}, len(uses))
+		if next >= 0 {
+			if nb, isArr := msgs[next].Content.([]any); isArr {
+				for _, raw := range nb {
+					b, isMap := raw.(map[string]any)
+					if !isMap {
+						continue
+					}
+					if t, _ := b["type"].(string); t != "tool_result" {
+						continue
+					}
+					if id, _ := b["tool_use_id"].(string); id != "" {
+						found[id] = struct{}{}
+					}
+				}
+			}
+		}
+		missing := make([]string, 0, len(uses))
+		for _, id := range uses {
+			if _, ok := found[id]; !ok {
+				missing = append(missing, id)
+			}
+		}
+		if len(missing) == 0 {
+			continue
+		}
+		const placeholder = "[系统自动补齐] 上一次工具调用没有返回结果（客户端缺少 tool_result），已按空结果继续。"
+		mk := func(id string) map[string]any {
+			return map[string]any{"type": "tool_result", "tool_use_id": id, "content": placeholder}
+		}
+		if next < 0 {
+			nb := make([]any, 0, len(missing))
+			for _, id := range missing {
+				nb = append(nb, mk(id))
+			}
+			req.Messages = append(req.Messages, dto.ClaudeMessage{Role: "user", Content: nb})
+			continue
+		}
+		var nb []any
+		if arr, isArr := msgs[next].Content.([]any); isArr {
+			nb = arr
+		}
+		if s, isStr := msgs[next].Content.(string); isStr && s != "" {
+			nb = append(nb, map[string]any{"type": "text", "text": s})
+		}
+		for _, id := range missing {
+			nb = append(nb, mk(id))
+		}
+		msgs[next].Content = nb
+	}
 }
